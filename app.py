@@ -8,7 +8,7 @@ from aiogram.filters.command import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from google import genai
 
-# --- КОНФИГУРАЦИЯ ---
+# --- КОНФИГУРАЦИЯ (все переменные обязательны) ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
@@ -27,10 +27,11 @@ if missing:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- КЛИЕНТ GEMINI (для Interactions API) ---
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_NAME = "gemini-3.8-flash"
 
-# --- BOT ---
+# --- TELEGRAM BOT ---
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -49,19 +50,29 @@ async def handle_prompt(message: types.Message):
     temp_message = await message.answer("🤔 Думаю...")
     try:
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
+        # Вызов через Interactions API (актуально для Gemini 3.x)
+        interaction = await loop.run_in_executor(
             None,
-            lambda: client.models.generate_content(model=MODEL_NAME, contents=prompt)
+            lambda: client.interactions.create(
+                model=MODEL_NAME,
+                input=prompt
+            )
         )
-        answer = response.text
+        answer = interaction.output_text
+
+        if not answer:
+            await temp_message.edit_text("😔 Модель вернула пустой ответ.")
+            return
+
         if len(answer) > 4000:
             for i in range(0, len(answer), 4000):
                 await message.answer(answer[i:i+4000])
             await temp_message.delete()
         else:
             await temp_message.edit_text(answer)
+
     except Exception as e:
-        logger.error(f"Ошибка Gemini: {e}")
+        logger.error(f"Ошибка Gemini: {type(e).__name__}: {e}")
         await temp_message.edit_text("😔 Ошибка при обращении к Gemini. Попробуйте позже.")
 
 # --- ВЕБХУК ---
@@ -89,11 +100,9 @@ def main():
     )
     handler.register(app, path="/webhook")
 
-    # Регистрируем хуки вручную ДО setup_application
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
-    # setup_application связывает aiohttp и aiogram, чтобы хуки сработали
     setup_application(app, dp, bot=bot)
 
     async def health(request):
