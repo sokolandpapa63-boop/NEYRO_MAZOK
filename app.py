@@ -1,23 +1,23 @@
 import asyncio
+import base64
 import logging
 import os
-import io
 
-from aiohttp import web, ClientSession
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters.command import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from openai import OpenAI
+from google import genai
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET")
 
 missing = [name for name, val in [
     ("BOT_TOKEN", BOT_TOKEN),
-    ("GROQ_API_KEY", GROQ_API_KEY),
+    ("GEMINI_API_KEY", GEMINI_API_KEY),
     ("RENDER_EXTERNAL_URL", RENDER_EXTERNAL_URL),
     ("WEBHOOK_SECRET", WEBHOOK_SECRET),
 ] if not val]
@@ -28,49 +28,25 @@ if missing:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- КЛИЕНТ GROQ (для текста) ---
-# Groq использует OpenAI-совместимый API [citation:5]
-groq_client = OpenAI(
-    api_key=GROQ_API_KEY,
-    base_url="https://api.groq.com/openai/v1"
-)
-MODEL_NAME = "openai/gpt-oss-20b"  # быстрая модель с большими лимитами [citation:3][citation:9]
+# --- КЛИЕНТ GEMINI ---
+client = genai.Client(api_key=GEMINI_API_KEY)
+TEXT_MODEL = "gemini-3.8-flash"
+IMAGE_MODEL = "gemini-3.1-flash-image"
 
-# --- TELEGRAM BOT ---
+# --- BOT ---
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
-# --- ФУНКЦИЯ ГЕНЕРАЦИИ КАРТИНКИ (Pollinations) ---
-async def generate_image(prompt: str) -> bytes:
-    """
-    Генерирует картинку через Pollinations и возвращает байты.
-    Pollinations не требует API-ключа для базовых моделей [citation:8][citation:13].
-    """
-    # Кодируем промпт для URL
-    import urllib.parse
-    encoded_prompt = urllib.parse.quote(prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
-
-    async with ClientSession() as session:
-        async with session.get(url) as response:
-            if response.status != 200:
-                raise Exception(f"Pollinations вернул статус {response.status}")
-            return await response.read()
-
-# --- ХЭНДЛЕРЫ ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "Привет! Я бот с двумя режимами:\n\n"
-        "💬 Просто напиши мне вопрос — отвечу текстом (Groq).\n"
-        "🎨 Напиши /image <описание> — нарисую картинку (Pollinations)."
+        "Привет! Я бот на Gemini. Могу ответить текстом или нарисовать картинку.\n\n"
+        "💬 Просто напиши вопрос.\n"
+        "🎨 Напиши /image <описание> для генерации картинки."
     )
 
 @dp.message(Command("image"))
 async def cmd_image(message: types.Message):
-    """Обработчик команды /image"""
-    # Извлекаем промпт после команды
     prompt = message.text.replace("/image", "").strip()
     if not prompt:
         await message.answer("Напиши, что нарисовать. Например: /image кот в космосе")
@@ -79,9 +55,31 @@ async def cmd_image(message: types.Message):
     temp_message = await message.answer("🎨 Рисую...")
 
     try:
-        image_bytes = await generate_image(prompt)
+        loop = asyncio.get_running_loop()
+        interaction = await loop.run_in_executor(
+            None,
+            lambda: client.interactions.create(
+                model=IMAGE_MODEL,
+                input=prompt,
+                response_format={"type": "image"}
+            )
+        )
 
-        # Отправляем картинку
+        image_bytes = None
+        # Пробуем разные способы достать картинку
+        if hasattr(interaction, 'output_image') and interaction.output_image:
+            image_bytes = base64.b64decode(interaction.output_image.data)
+        elif hasattr(interaction, 'steps'):
+            for step in interaction.steps:
+                if step.type == "model_output":
+                    for content_block in step.content:
+                        if content_block.type == "image":
+                            image_bytes = base64.b64decode(content_block.data)
+                            break
+
+        if not image_bytes:
+            raise Exception("Модель не вернула изображение")
+
         photo = types.BufferedInputFile(image_bytes, filename="image.png")
         await message.answer_photo(photo=photo, caption=f"🎨 {prompt}")
         await temp_message.delete()
@@ -92,7 +90,6 @@ async def cmd_image(message: types.Message):
 
 @dp.message()
 async def handle_prompt(message: types.Message):
-    """Обработчик всех остальных текстовых сообщений (текстовый режим)"""
     if not message.text:
         return
     prompt = message.text.strip()
@@ -101,16 +98,15 @@ async def handle_prompt(message: types.Message):
 
     temp_message = await message.answer("🤔 Думаю...")
     try:
-        # Groq — синхронный вызов, выносим в отдельный поток
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
+        interaction = await loop.run_in_executor(
             None,
-            lambda: groq_client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[{"role": "user", "content": prompt}]
+            lambda: client.interactions.create(
+                model=TEXT_MODEL,
+                input=prompt
             )
         )
-        answer = response.choices[0].message.content
+        answer = interaction.output_text
 
         if not answer:
             await temp_message.edit_text("😔 Модель вернула пустой ответ.")
@@ -124,8 +120,8 @@ async def handle_prompt(message: types.Message):
             await temp_message.edit_text(answer)
 
     except Exception as e:
-        logger.error(f"Ошибка Groq: {type(e).__name__}: {e}")
-        await temp_message.edit_text("😔 Ошибка при обращении к Groq. Попробуйте позже.")
+        logger.error(f"Ошибка Gemini (текст): {type(e).__name__}: {e}")
+        await temp_message.edit_text("😔 Ошибка при обращении к Gemini. Попробуйте позже.")
 
 # --- ВЕБХУК ---
 async def on_startup(bot: Bot):
