@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_NAME = "gemini-3.5-flash"
 
-# Flask для Render
+# --- FLASK (будет запущен в отдельном потоке) ---
 app = Flask(__name__)
 
 @app.route("/")
@@ -32,7 +32,12 @@ def index():
 def health():
     return "OK"
 
-# Telegram Bot
+def run_flask():
+    """Запускает Flask в отдельном потоке. Flask — синхронный, поэтому ошибки set_wakeup_fd не будет."""
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
+
+# --- TELEGRAM BOT (в главном потоке) ---
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -66,12 +71,12 @@ async def handle_prompt(message: types.Message):
         logger.error(f"Ошибка Gemini: {e}")
         await temp_message.edit_text("😔 Ошибка при обращении к Gemini. Попробуйте позже.")
 
-def run_bot():
+if __name__ == "__main__":
+    # 1. Запускаем Flask в фоновом потоке
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    # 2. Запускаем aiogram в главном потоке
+    logger.info("Запуск Telegram-бота...")
     asyncio.run(bot.delete_webhook(drop_pending_updates=True))
     asyncio.run(dp.start_polling(bot))
-
-if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
