@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-3.8-flash"
 
 # --- BOT ---
 bot = Bot(token=BOT_TOKEN)
