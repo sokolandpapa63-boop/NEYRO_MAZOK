@@ -5,16 +5,15 @@ import os
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters.command import Command
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from google import genai
 
-# --- ВСЕ ПЕРЕМЕННЫЕ ОБЯЗАТЕЛЬНЫ ---
+# --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET")
 
-# Если чего-то нет — падаем с понятным сообщением
 missing = [name for name, val in [
     ("BOT_TOKEN", BOT_TOKEN),
     ("GEMINI_API_KEY", GEMINI_API_KEY),
@@ -49,7 +48,7 @@ async def handle_prompt(message: types.Message):
 
     temp_message = await message.answer("🤔 Думаю...")
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None,
             lambda: client.models.generate_content(model=MODEL_NAME, contents=prompt)
@@ -67,17 +66,15 @@ async def handle_prompt(message: types.Message):
 
 # --- ВЕБХУК ---
 async def on_startup(bot: Bot):
-    """Ставим вебхук при старте."""
     webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
     await bot.set_webhook(
         webhook_url,
-        secret_token=WEBHOOK_SECRET,  # уже обязательный, None быть не может
+        secret_token=WEBHOOK_SECRET,
         drop_pending_updates=True,
     )
     logger.info(f"Вебхук установлен: {webhook_url}")
 
 async def on_shutdown(bot: Bot):
-    """Убираем вебхук при остановке."""
     await bot.delete_webhook()
     logger.info("Вебхук удалён")
 
@@ -85,7 +82,6 @@ async def on_shutdown(bot: Bot):
 def main():
     app = web.Application()
 
-    # Обработчик вебхука (secret_token обязателен)
     handler = SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
@@ -93,11 +89,13 @@ def main():
     )
     handler.register(app, path="/webhook")
 
-    # Регистрируем startup/shutdown хуки
+    # Регистрируем хуки вручную ДО setup_application
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
-    # Health-check для UptimeRobot
+    # setup_application связывает aiohttp и aiogram, чтобы хуки сработали
+    setup_application(app, dp, bot=bot)
+
     async def health(request):
         return web.Response(text="OK")
     app.router.add_get("/health", health)
