@@ -34,7 +34,7 @@ groq_client = OpenAI(
     api_key=GROQ_API_KEY,
     base_url="https://api.groq.com/openai/v1"
 )
-MODEL_NAME = "llama-3.1-8b-instant"  # быстрая модель с большими лимитами [citation:3][citation:9]
+MODEL_NAME = "openai/gpt-oss-20b"  # быстрая модель с большими лимитами [citation:3][citation:9]
 
 # --- TELEGRAM BOT ---
 bot = Bot(token=BOT_TOKEN)
