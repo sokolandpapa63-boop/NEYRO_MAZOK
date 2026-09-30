@@ -1,43 +1,37 @@
 import asyncio
 import logging
 import os
-import threading
 
-from flask import Flask
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters.command import Command
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from google import genai
 
-# --- КОНФИГУРАЦИЯ ---
+# --- ВСЕ ПЕРЕМЕННЫЕ ОБЯЗАТЕЛЬНЫ ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET")
 
-if not BOT_TOKEN or not GEMINI_API_KEY:
-    raise ValueError("Не заданы переменные окружения BOT_TOKEN или GEMINI_API_KEY")
+# Если чего-то нет — падаем с понятным сообщением
+missing = [name for name, val in [
+    ("BOT_TOKEN", BOT_TOKEN),
+    ("GEMINI_API_KEY", GEMINI_API_KEY),
+    ("RENDER_EXTERNAL_URL", RENDER_EXTERNAL_URL),
+    ("WEBHOOK_SECRET", WEBHOOK_SECRET),
+] if not val]
+
+if missing:
+    raise ValueError(f"Не заданы переменные окружения: {', '.join(missing)}")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_NAME = "gemini-3.5-flash"
+MODEL_NAME = "gemini-2.5-flash"
 
-# --- FLASK (будет запущен в отдельном потоке) ---
-app = Flask(__name__)
-
-@app.route("/")
-def index():
-    return "Bot is running"
-
-@app.route("/health")
-def health():
-    return "OK"
-
-def run_flask():
-    """Запускает Flask в отдельном потоке. Flask — синхронный, поэтому ошибки set_wakeup_fd не будет."""
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
-
-# --- TELEGRAM BOT (в главном потоке) ---
+# --- BOT ---
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -71,12 +65,46 @@ async def handle_prompt(message: types.Message):
         logger.error(f"Ошибка Gemini: {e}")
         await temp_message.edit_text("😔 Ошибка при обращении к Gemini. Попробуйте позже.")
 
-if __name__ == "__main__":
-    # 1. Запускаем Flask в фоновом потоке
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
+# --- ВЕБХУК ---
+async def on_startup(bot: Bot):
+    """Ставим вебхук при старте."""
+    webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
+    await bot.set_webhook(
+        webhook_url,
+        secret_token=WEBHOOK_SECRET,  # уже обязательный, None быть не может
+        drop_pending_updates=True,
+    )
+    logger.info(f"Вебхук установлен: {webhook_url}")
 
-    # 2. Запускаем aiogram в главном потоке
-    logger.info("Запуск Telegram-бота...")
-    asyncio.run(bot.delete_webhook(drop_pending_updates=True))
-    asyncio.run(dp.start_polling(bot))
+async def on_shutdown(bot: Bot):
+    """Убираем вебхук при остановке."""
+    await bot.delete_webhook()
+    logger.info("Вебхук удалён")
+
+# --- ЗАПУСК ---
+def main():
+    app = web.Application()
+
+    # Обработчик вебхука (secret_token обязателен)
+    handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+        secret_token=WEBHOOK_SECRET,
+    )
+    handler.register(app, path="/webhook")
+
+    # Регистрируем startup/shutdown хуки
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+
+    # Health-check для UptimeRobot
+    async def health(request):
+        return web.Response(text="OK")
+    app.router.add_get("/health", health)
+    app.router.add_get("/", health)
+
+    port = int(os.environ.get("PORT", 10000))
+    web.run_app(app, host="0.0.0.0", port=port)
+
+if __name__ == "__main__":
+    main()
